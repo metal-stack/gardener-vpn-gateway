@@ -1,0 +1,70 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-audit-tailer
+  namespace: kube-system
+  labels:
+    k8s-app: kubernetes-audit-tailer
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-audit-tailer
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-audit-tailer
+        app: kubernetes-audit-tailer
+        networking.gardener.cloud/to-public-networks: allowed
+    spec:
+      # it's better to disable the service links as the default args do not work properly otherwise (metal#64)
+      enableServiceLinks: False
+      containers:
+      - image: fluent/fluentd:v1.11
+        imagePullPolicy: IfNotPresent
+        name: kubernetes-audit-tailer
+        env: []
+        # - name: FLUENTD_CONF
+        #   value: /fluentd/fluentd.conf
+        ports:
+        - containerPort: 24224
+          protocol: TCP
+        volumeMounts:
+        - name: fluentd-config
+          mountPath: /fluentd/etc
+      volumes:
+      - name: fluentd-config
+        configMap:
+          name: kubernetes-audit-tailer-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubernetes-audit-tailer-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubernetes-audit-tailer
+data:
+  fluent.conf: |
+    <source>
+      @type forward
+      port 24224
+      bind 0.0.0.0
+    </source>
+    <match **>
+      @type stdout
+    </match>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-audit-tailer
+  namespace: kube-system
+  labels:
+    app: kubernetes-audit-tailer
+spec:
+  selector:
+    app: kubernetes-audit-tailer
+  ports:
+  - port: 24224
+    targetPort: 24224

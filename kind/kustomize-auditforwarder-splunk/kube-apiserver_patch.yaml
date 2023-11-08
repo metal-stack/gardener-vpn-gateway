@@ -1,0 +1,34 @@
+- op: add
+  path: /spec/containers/1
+  value:
+    image: ghcr.io/metal-stack/audit-forwarder:pr-consolidate-proxies
+    imagePullPolicy: Always
+    name: audit-forwarder
+    env:
+    - name: AUDIT_KUBECFG
+      value: "/kube.config"
+    - name: AUDIT_LOG_LEVEL
+      value: "info"
+    - name: AUDIT_MEM_BUF_LIMIT
+      value: "200M"
+    volumeMounts:
+    - mountPath: /auditlog
+      name: auditlog
+    - mountPath: /kube.config
+      name: kubeconfig
+    - mountPath: /fluent-bit/etc/add
+      name: add-config
+- op: add
+  path: /spec/volumes/0
+  value:
+    hostPath:
+      path: /etc/kubernetes/audit/kube.config
+      type: File
+    name: kubeconfig
+- op: add
+  path: /spec/volumes/0
+  value:
+    hostPath:
+      path: /etc/kubernetes/audit/add
+      type: Directory
+    name: add-config

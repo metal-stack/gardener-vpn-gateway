@@ -1,0 +1,2 @@
+# Ignore the kind subdirectory because it just contains test setups for the auditforwarder.
+kind

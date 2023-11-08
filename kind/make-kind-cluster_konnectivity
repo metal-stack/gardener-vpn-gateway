@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# Do not forget to run (as root): rm -rf kind-etc-kubernetes/*
+
+# We expose the control plane node's /etc/kubernetes directory in kind-etc-kubernetes. It needs to exist and be empty.
+if [ -d kind-etc-kubernetes ]; then
+    if [ ! -z "$(ls -A kind-etc-kubernetes)" ]; then
+        echo "Directory kind-etc-kubernetes must be empty"
+        exit
+    fi
+else
+    echo "Directory kind-etc-kubernetes must exist; creating"
+    mkdir kind-etc-kubernetes
+fi
+
+# Copy the audit policy and konnectivity configuration bits
+cp -R audit/ kind-etc-kubernetes/audit/
+cp -R konnectivity kind-etc-kubernetes/konnectivity/
+
+# Creating the cluster and exporting the kubeconfig
+kind create cluster --config multinodecluster-with-auditlog_konnectivity.yaml
+kind export kubeconfig --kubeconfig kube.config
+
+# Apply the tailer certificates secrets
+kubectl apply -f certs/tailer-certs.yaml
+# Generate clusterrolebinding for konnectivity
+kubectl create clusterrolebinding --user system:konnectivity-server --clusterrole system:auth-delegator system:konnectivity-server
+
+echo "Cluster created, before the next step execute:"
+echo "sudo chown -R `id -n -u`:`id -n -g` kind-etc-kubernetes"
+echo "and then"
+echo "chmod -R a+r kind-etc-kubernetes"
+echo "so that the kind cluster kubernetes manifests can be modified without root privileges."

@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: konnectivity-agent
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: konnectivity-agent
+    k8s-app: konnectivity-agent
+  name: konnectivity-agent
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: konnectivity-agent
+  template:
+    metadata:
+      labels:
+        app: konnectivity-agent
+        k8s-app: konnectivity-agent
+        type: tunnel
+    spec:
+      containers:
+      - args:
+        # - --log-file=/var/log/konnectivity-agent/info.log
+        - --logtostderr=true
+        # - --log-file-max-size=12
+        - --ca-cert=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        - --proxy-server-host=APISERVERIP
+        - --proxy-server-port=8132
+        - --service-account-token-path=/var/run/secrets/tokens/konnectivity-agent-token
+        command:
+        - /proxy-agent
+        image: k8s.gcr.io/kas-network-proxy/proxy-agent:v0.0.15
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            host: 127.0.0.1
+            path: /healthz
+            port: 8093
+            scheme: HTTP
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 15
+        name: konnectivity-agent
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/log/konnectivity-agent
+          name: konnectivity-agent-log
+        - mountPath: /var/run/secrets/tokens
+          name: konnectivity-agent-token
+      dnsPolicy: ClusterFirst
+      hostNetwork: true
+      priorityClassName: system-cluster-critical
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: konnectivity-agent
+      serviceAccountName: konnectivity-agent
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+      volumes:
+      - emptyDir: {}
+        name: konnectivity-agent-log
+      - name: konnectivity-agent-token
+        projected:
+          defaultMode: 420
+          sources:
+          - serviceAccountToken:
+              audience: system:konnectivity-server
+              expirationSeconds: 3600
+              path: konnectivity-agent-token
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate

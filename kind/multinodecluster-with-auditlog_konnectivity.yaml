@@ -1,0 +1,59 @@
+# three node (two workers) cluster config
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+kubeadmConfigPatches:
+- |
+  apiVersion: kubeadm.k8s.io/v1beta2
+  kind: ClusterConfiguration
+  metadata:
+    name: config
+  apiServer:
+    extraArgs:
+      audit-policy-file: /etc/kubernetes/audit/audit-policy.yaml
+      audit-log-path: /auditlog/audit.log
+      egress-selector-config-file: /etc/kubernetes/konnectivity/egress-selector-configuration.yaml
+      service-account-issuer: kubernetes.default.svc
+      service-account-signing-key-file: /etc/kubernetes/pki/sa.key
+      token-auth-file: /etc/kubernetes/konnectivity/known_tokens.csv
+    extraVolumes:
+    - name: konnectivity
+      pathType: Directory
+      readOnly: true
+      hostPath: /etc/kubernetes/konnectivity
+      mountPath: /etc/kubernetes/konnectivity
+    # - name: pki
+    #   pathType: Directory
+    #   readOnly: true
+    #   hostPath: /etc/kubernetes/pki
+    #   mountPath: /etc/kubernetes/pki
+    - name: konnectivity-uds
+      pathType: Directory
+      readOnly: false
+      hostPath: /etc/srv/kubernetes/konnectivity-server
+      mountPath: /etc/srv/kubernetes/konnectivity-server
+    - name: auditpolicy
+      pathType: File
+      readOnly: true
+      hostPath: /etc/kubernetes/audit/audit-policy.yaml
+      mountPath: /etc/kubernetes/audit/audit-policy.yaml
+    - name: auditlog
+      # Mounting just the file caused a problem with log rotation.
+      # For the real apiserver in the gardener environment this needs to be an emptyDir mount. We'll do that by patching the manifest and leaving the volume out of the kind config.
+      pathType: Directory
+      readOnly: False
+      hostPath: /var/log/audit
+      mountPath: /auditlog
+nodes:
+- role: control-plane
+  extraMounts:
+  - containerPath: /etc/srv/kubernetes/konnectivity-server
+    hostPath: konnectivity-uds/
+    readOnly: false
+  - containerPath: /etc/kubernetes/
+    hostPath: kind-etc-kubernetes/
+    readOnly: false
+  - containerPath: /var/log/audit
+    hostPath: auditlog/
+    readOnly: false
+- role: worker
+- role: worker

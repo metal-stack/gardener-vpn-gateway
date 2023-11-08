@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# First check if a forwarder has already been applied and get the kube-apiserver manifest if it isn't.
+if grep forwarder kind-etc-kubernetes/manifests/kube-apiserver.yaml >/dev/null; then
+    echo "Forwarder config already applied."
+    if [ ! -f kustomize-auditforwarder-splunk/kube-apiserver.yaml ]; then
+        echo "No saved kube-apiserver manifest exists, exiting."
+        exit
+    else
+        if grep forwarder kustomize-auditforwarder-splunk/kube-apiserver.yaml >/dev/null; then
+            echo "Saved config contains forwarder too, can not patch. Exiting."
+            exit
+        fi
+    fi
+else
+    echo "Getting kube-apiserver manifest."
+    cp kind-etc-kubernetes/manifests/kube-apiserver.yaml kustomize-auditforwarder-splunk/
+fi
+
+# Patch the generated kind kubeconfig with the apiserver URL valid from within the cluster.
+
+echo "Generating the in-cluster kubeconfig:"
+
+# Get the IP and port from the apiserver manifest:
+line=`grep kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint kustomize-auditforwarder-splunk/kube-apiserver.yaml`
+apiserver=${line##*kubeadm.kubernetes.io\/kube-apiserver.advertise-address.endpoint:?}
+
+sed "s+https://.*$+https://$apiserver+" kube.config >kind-etc-kubernetes/audit/kube.config
+
+echo "Patching and applying the kube-apiserver manifest:"
+kustomize build kustomize-auditforwarder-splunk >kind-etc-kubernetes/manifests/kube-apiserver.yaml

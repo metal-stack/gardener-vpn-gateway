@@ -1,0 +1,39 @@
+# This file adds the auditforwarder.
+- op: add
+  path: /spec/containers/1
+  value:
+    image: ghcr.io/metal-stack/audit-forwarder:pr-consolidate-proxies
+    imagePullPolicy: Always
+    name: audit-forwarder
+    env:
+    - name: AUDIT_KUBECFG
+      value: "/kube.config"
+    - name: AUDIT_LOG_LEVEL
+      value: "debug"
+    - name: AUDIT_KONNECTIVITY_UDS_SOCKET
+      value: "/konnectivity-uds/konnectivity-server.socket"
+    - name: AUDIT_MEM_BUF_LIMIT
+      value: "20M"
+    volumeMounts:
+    - mountPath: /auditlog
+      name: auditlog
+    - mountPath: /kube.config
+      name: kubeconfig
+    - mountPath: /konnectivity-uds
+      name: konnectivity-uds
+    # - mountPath: /fluent-bit/etc/ssl
+    #   name: forwarder-certs
+- op: add
+  path: /spec/volumes/0
+  value:
+    hostPath:
+      path: /etc/kubernetes/audit/kube.config
+      type: File
+    name: kubeconfig
+# - op: add
+#   path: /spec/volumes/0
+#   value:
+#     hostPath:
+#       path: /etc/kubernetes/audit/ssl
+#       type: Directory
+#     name: forwarder-certs

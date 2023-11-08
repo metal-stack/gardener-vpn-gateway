@@ -1,0 +1,7 @@
+resources:
+- kube-apiserver.yaml
+patches:
+- path: kube-apiserver_konnectivity_patch.yaml
+  target:
+    kind: Pod
+    name: kube-apiserver

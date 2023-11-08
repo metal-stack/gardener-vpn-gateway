@@ -1,0 +1,121 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-audit-tailer
+  namespace: kube-system
+  labels:
+    k8s-app: kubernetes-audit-tailer
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-audit-tailer
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-audit-tailer
+        app: kubernetes-audit-tailer
+        networking.gardener.cloud/to-public-networks: allowed
+    spec:
+      # it's better to disable the service links as the default args do not work properly otherwise (metal#64)
+      enableServiceLinks: False
+      securityContext:
+        runAsUser: 65534
+      containers:
+      - image: alpine
+        command:
+          - "nc"
+          - "-l"
+          - "-p"
+          - "24224"
+        imagePullPolicy: IfNotPresent
+        name: kubernetes-audit-tailer
+        env:
+        # This is supposed to limit fluentd memory usage. See https://docs.fluentd.org/deployment/performance-tuning-single-process#reduce-memory-usage.
+        - name: RUBY_GC_HEAP_OLDOBJECT_LIMIT_FACTOR
+          value: "1.2"
+        ports:
+        - containerPort: 24224
+          protocol: TCP
+        volumeMounts:
+        - name: fluentd-config
+          mountPath: /fluentd/etc
+        - name: fluentd-certs
+          mountPath: /fluentd/etc/ssl
+        - name: fluentbuffer
+          mountPath: /fluentbuffer
+        resources:
+          limits:
+            cpu: 100m
+            memory: 200Mi
+      restartPolicy: Always
+      volumes:
+      - name: fluentd-config
+        configMap:
+          name: kubernetes-audit-tailer-config
+      - name: fluentd-certs
+        secret:
+          secretName: audittailer-server
+      - name: fluentbuffer
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubernetes-audit-tailer-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubernetes-audit-tailer
+data:
+  fluent.conf: |
+    <source>
+      @type forward
+      port 24224
+      bind 0.0.0.0
+      <transport tls>
+        ca_path                   /fluentd/etc/ssl/ca.crt
+        cert_path                 /fluentd/etc/ssl/audittailer-server.crt
+        private_key_path          /fluentd/etc/ssl/audittailer-server.key
+        # private_key_passphrase  YOUR_PASSPHRASE
+        client_cert_auth          true
+      </transport>
+    </source>
+    <match **>
+      @type stdout
+      <buffer>
+        @type file
+        path /fluentbuffer/auditlog-*
+        chunk_limit_size          256Mb
+        # This was for memory buffer:
+        # total_limit_size          128Mb
+        # chunk_limit_size          8Mb
+      </buffer>
+      <format>
+        @type json
+      </format>
+    </match>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-audit-tailer
+  namespace: kube-system
+  labels:
+    app: kubernetes-audit-tailer
+spec:
+  # selector:
+  #   app: kubernetes-audit-tailer
+  ports:
+  - port: 24224
+    targetPort: 24224
+---
+kind: Endpoints
+apiVersion: v1
+metadata:
+  name: kubernetes-audit-tailer
+  namespace: kube-system
+subsets:
+  - addresses:
+      - ip: 203.0.113.114
+    ports:
+      - port: 24224

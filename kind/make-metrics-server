@@ -1,0 +1,7 @@
+#!/bin/sh
+
+# Install the metrics server from release, and patch it for kind; according to https://gist.github.com/sanketsudake/a089e691286bf2189bfedf295222bd43
+
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.5.0/components.yaml
+
+kubectl patch deployment metrics-server -n kube-system --patch "$(cat metric-server-patch.yaml)"

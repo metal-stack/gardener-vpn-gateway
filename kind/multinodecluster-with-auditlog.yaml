@@ -1,0 +1,37 @@
+# three node (two workers) cluster config
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+kubeadmConfigPatches:
+- |
+  apiVersion: kubeadm.k8s.io/v1beta2
+  kind: ClusterConfiguration
+  metadata:
+    name: config
+  apiServer:
+    extraArgs:
+      audit-policy-file: /etc/kubernetes/audit/audit-policy.yaml
+      audit-log-path: /auditlog/audit.log
+    extraVolumes:
+    - name: auditpolicy
+      pathType: File
+      readOnly: true
+      hostPath: /etc/kubernetes/audit/audit-policy.yaml
+      mountPath: /etc/kubernetes/audit/audit-policy.yaml
+    - name: auditlog
+      # Mounting just the file caused a problem with log rotation.
+      # For the real apiserver in the gardener environment this needs to be an emptyDir mount. We'll do that by patching the manifest and leaving the volume out of the kind config.
+      pathType: Directory
+      readOnly: False
+      hostPath: /var/log/audit
+      mountPath: /auditlog
+nodes:
+- role: control-plane
+  extraMounts:
+  - containerPath: /etc/kubernetes/
+    hostPath: kind-etc-kubernetes/
+    readOnly: false
+  - containerPath: /var/log/audit
+    hostPath: auditlog/
+    readOnly: false
+- role: worker
+- role: worker

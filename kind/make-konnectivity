@@ -1,0 +1,38 @@
+#!/bin/sh
+
+# First check if a konnectivity server has already been applied and get the kube-apiserver manifest if it isn't.
+# proxy-server is the command run in the konnectivity-server container.
+if grep proxy-server kind-etc-kubernetes/manifests/kube-apiserver.yaml >/dev/null; then
+    echo "Konnectivity-server config already applied."
+    if [ ! -f kustomize-konnectivity/kube-apiserver.yaml ]; then
+        echo "No saved kube-apiserver manifest exists, exiting."
+        exit
+    else
+        if grep proxy-server kustomize-konnectivity/kube-apiserver.yaml >/dev/null; then
+            echo "Saved config contains konnectivty-server too, can not patch. Exiting."
+            exit
+        fi
+    fi
+else
+    echo "Getting kube-apiserver manifest."
+    cp kind-etc-kubernetes/manifests/kube-apiserver.yaml kustomize-konnectivity/
+fi
+
+echo "Patching and applying the kube-apiserver manifest:"
+kustomize build kustomize-konnectivity >kind-etc-kubernetes/manifests/kube-apiserver.yaml
+
+# Patch the konnectivity-agent daemonset with the apiserver IP
+
+echo "Patching and applying konnectivity-agent manifest:"
+
+# Get the IP and port from the apiserver manifest:
+line=`grep kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint kustomize-konnectivity/kube-apiserver.yaml`
+apiserver=${line##*kubeadm.kubernetes.io\/kube-apiserver.advertise-address.endpoint:?}
+apiserverIP=${apiserver%%:*}
+
+sed "s+APISERVERIP+$apiserverIP+" konnectivity-agent.yaml | kubectl apply -f -
+
+# Wait a little so there's no timing problem
+# echo "Waiting a bit"
+# sleep 5
+
