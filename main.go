@@ -14,6 +14,7 @@ import (
 
 	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 
 	"context"
@@ -67,7 +68,7 @@ func (c *CronLogger) Error(err error, msg string, keysAndValues ...interface{}) 
 // https://github.com/spf13/viper/issues/397
 type Opts struct {
 	ShootKubeconfig        string `validate:"required"`
-	SeedKubeconfig         string `validate:"required"`
+	SeedKubeconfig         string
 	NameSpace              string `validate:"required"`
 	ServiceName            string `validate:"required"`
 	CheckSchedule          string
@@ -111,7 +112,7 @@ func init() {
 	cmd.Flags().StringVarP(&cfgFile, "config", "c", "", "alternative path to config file")
 
 	cmd.Flags().StringP("shoot-kubeconfig", "o", homedir+"/.kube/config", "path to the shoot kubeconfig")
-	cmd.Flags().StringP("seed-kubeconfig", "o", homedir+"/.kube/seedconfig", "path to the seed kubeconfig")
+	cmd.Flags().StringP("seed-kubeconfig", "o", "", "path to the seed kubeconfig. Uses default path if empty.")
 	cmd.Flags().StringP("namespace", "n", "kube-system", "the namespace of the target service")
 	cmd.Flags().StringP("service-name", "s", "", "the service name of the target service")
 	cmd.Flags().StringP("check-schedule", "S", "*/1 * * * *", "cron schedule when to check for service changes")
@@ -235,9 +236,15 @@ func run(opts *Opts) error {
 		return err
 	}
 
-	seedClient, err := loadClient(opts.SeedKubeconfig)
+	var seedClient *k8s.Clientset
+	if opts.SeedKubeconfig != "" {
+		seedClient, err = loadClient(opts.SeedKubeconfig)
+	} else {
+		seedConfig := ctrl.GetConfigOrDie()
+		seedClient, err = k8s.NewForConfig(seedConfig)
+	}
 	if err != nil {
-		logger.Errorw("Unable to connect to shoot k8s", "Error", err)
+		logger.Errorw("Unable to connect to seed k8s", "Kubeconfig", opts.SeedKubeconfig, "Error", err)
 		return err
 	}
 
