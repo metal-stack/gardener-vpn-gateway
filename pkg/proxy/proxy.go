@@ -1,5 +1,5 @@
 /*
-Helper package for opening a http connect proxy connection to tunnel audit data to the cluster;
+Helper package for opening a http connect proxy connection to tunnel connections to the cluster;
 either a uds socket or a mTLS proxy, and
 open a listener and forward connections through the proxy connection.
 
@@ -27,8 +27,9 @@ type Proxy struct {
 	logger          *zap.SugaredLogger
 	proxyHost       string
 	proxyPort       string
-	clientCert      tls.Certificate
-	proxyCAPool     *x509.CertPool
+	clientCertFile  string
+	clientKeyFile   string
+	proxyCAFile     string
 	destinationIP   string
 	destinationPort string
 	listenerIP      string
@@ -39,31 +40,21 @@ type Proxy struct {
 // Creates a new proxy instance and opens a TCP listener for accepting connections.
 func NewProxyMTLS(logger *zap.SugaredLogger, proxyHost, proxyPort, clientCertFile, clientKeyFile, proxyCAFile, destinationIP, destinationPort, listenerIP, listenerPort string) (*Proxy, error) {
 	logger.Infow("NewProxyMTLS called", "proxy host", proxyHost, "proxy port", proxyPort, "listener IP", listenerIP, "listener port", listenerPort)
-	clientCert, err := tls.LoadX509KeyPair(clientCertFile, clientKeyFile)
-	if err != nil {
-		logger.Errorw("Could not read client certificate and key", "client cert", clientCertFile, "client key", clientKeyFile)
-		return nil, err
-	}
-	proxyCAPEM, err := os.ReadFile(proxyCAFile)
-	if err != nil {
-		logger.Errorw("Couldn't load proxy CA file", "proxyCAFile", proxyCAFile)
-	}
-	proxyCAPool := x509.NewCertPool()
-	proxyCAPool.AppendCertsFromPEM(proxyCAPEM)
 
 	proxy := &Proxy{
 		logger:          logger,
 		proxyHost:       proxyHost,
 		proxyPort:       proxyPort,
-		clientCert:      clientCert,
-		proxyCAPool:     proxyCAPool,
+		clientCertFile:  clientCertFile,
+		clientKeyFile:   clientKeyFile,
+		proxyCAFile:     proxyCAFile,
 		destinationIP:   destinationIP,
 		destinationPort: destinationPort,
 		listenerIP:      listenerIP,
 		listenerPort:    listenerPort,
 	}
 
-	err = proxy.listen()
+	err := proxy.listen()
 	if err != nil {
 		logger.Errorw("Error opening listener", "proxy", proxy)
 		return nil, err
@@ -106,15 +97,30 @@ func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
 	p.logger.Infow("handleConnection called", "local address", srvConn.LocalAddr(), "remote address", srvConn.RemoteAddr(), "proxy host", p.proxyHost, "proxy port", p.proxyPort, "target address", p.destinationIP)
 	var proxyConn net.Conn
 	var err error
+
+	clientCert, err := tls.LoadX509KeyPair(p.clientCertFile, p.clientKeyFile)
+	if err != nil {
+		p.logger.Errorw("Could not read client certificate and key", "client cert", p.clientCertFile, "client key", p.clientKeyFile)
+		return
+	}
+	proxyCAPEM, err := os.ReadFile(p.proxyCAFile)
+	if err != nil {
+		p.logger.Errorw("Couldn't load proxy CA file", "proxyCAFile", p.proxyCAFile)
+		return
+	}
+	proxyCAPool := x509.NewCertPool()
+	proxyCAPool.AppendCertsFromPEM(proxyCAPEM)
+
 	proxyConn, err = tls.Dial("tcp", p.proxyHost+":"+p.proxyPort, &tls.Config{
-		Certificates: []tls.Certificate{p.clientCert},
-		RootCAs:      p.proxyCAPool,
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      proxyCAPool,
 		MinVersion:   tls.VersionTLS12,
 	})
 	if err != nil {
 		p.logger.Errorw("dialing mTLS proxy failed", "proxy address", p.proxyHost+":"+p.proxyPort, "error", err)
+		return
 	}
-	fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n", net.JoinHostPort(p.destinationIP, p.destinationPort), p.listenerIP, "auditforwarder")
+	fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n", net.JoinHostPort(p.destinationIP, p.destinationPort), p.listenerIP, "gardener-vpn-gateway")
 	br := bufio.NewReader(proxyConn)
 	res, err := http.ReadResponse(br, nil)
 	if err != nil {

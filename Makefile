@@ -4,7 +4,7 @@ GITVERSION := $(shell git describe --long --all)
 BUILDDATE := $(shell GO111MODULE=off go run ${COMMONDIR}/time.go)
 VERSION := $(or ${VERSION},$(shell git describe --tags --exact-match 2> /dev/null || git symbolic-ref -q --short HEAD || git rev-parse --short HEAD))
 
-BINARY := audit-forwarder
+BINARY := gardener-vpn-gateway
 LINKMODE := -extldflags '-static -s -w' \
 	-X 'github.com/metal-stack/v.Version=$(VERSION)' \
 	-X 'github.com/metal-stack/v.Revision=$(GITVERSION)' \
@@ -37,7 +37,7 @@ release: bin/$(BINARY)
 	&& cd -
 
 dockerimage:
-	docker build -t ghcr.io/metal-stack/audit-forwarder .
+	docker build -t ghcr.io/metal-stack/gardener-vpn-gateway .
 
 .PHONY: all
 all:: release;

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path"
 	"time"
 
 	"go.uber.org/zap"
@@ -20,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/metal-stack/audit-forwarder/pkg/proxy"
+	"github.com/metal-stack/gardener-vpn-gateway/pkg/proxy"
 	"github.com/metal-stack/v"
 
 	"github.com/go-playground/validator/v10"
@@ -30,12 +31,8 @@ import (
 )
 
 const (
-	cfgFileType = "yaml"
-	moduleName  = "audit-forwarder"
-	commandName = "/fluent-bit/bin/fluent-bit"
-	commandArgs = "--config=/fluent-bit/etc/fluent-bit.conf"
-	// commandName  = "sleep"
-	// commandArgs  = "3600"
+	cfgFileType        = "yaml"
+	moduleName         = "gardener-vpn-gateway"
 	proxyListenAddress = "0.0.0.0"
 	proxyListenPort    = "9876"
 )
@@ -46,6 +43,7 @@ var (
 	logLevel      zapcore.Level
 	stop          context.Context
 	targetService *corev1.Service
+	secretCronID  cron.EntryID
 	serviceCronID cron.EntryID
 	clusterProxy  *proxy.Proxy
 )
@@ -68,23 +66,26 @@ func (c *CronLogger) Error(err error, msg string, keysAndValues ...interface{}) 
 // this is because MarkFlagRequired from cobra does not work well with viper, see:
 // https://github.com/spf13/viper/issues/397
 type Opts struct {
-	KubeCfg            string
-	NameSpace          string
-	ServiceName        string
-	SecretName         string
-	CheckSchedule      string
-	BackoffTimer       time.Duration
-	LogLevel           string
-	ProxyHost          string
-	ProxyPort          string
-	ProxyCaFile        string
-	ProxyClientCrtFile string
-	ProxyClientKeyFile string
+	ShootKubeconfig        string `validate:"required"`
+	SeedKubeconfig         string `validate:"required"`
+	NameSpace              string `validate:"required"`
+	ServiceName            string `validate:"required"`
+	CheckSchedule          string
+	BackoffTimer           time.Duration
+	LogLevel               string
+	ProxyHost              string
+	ProxyPort              string
+	ProxyCASecret          string
+	ProxyClientSecret      string
+	TLSBaseDir             string
+	ProxyCaFilename        string
+	ProxyClientCrtFilename string
+	ProxyClientKeyFilename string
 }
 
 var cmd = &cobra.Command{
 	Use:     moduleName,
-	Short:   "A program to forward audit logs to a service in the cluster. It looks for a matching service, then starts listens for connections from the fluent-bit log forwarder and tunnels the connection through the VPN to the audittailer service.",
+	Short:   "A program to forward a connection transparently to a service in the cluster. It looks for a matching service, then listens for connections and tunnels the connection through the VPN to the target service.",
 	Version: v.V.String(),
 	Run: func(cmd *cobra.Command, args []string) {
 		initConfig()
@@ -109,18 +110,21 @@ func init() {
 
 	cmd.Flags().StringVarP(&cfgFile, "config", "c", "", "alternative path to config file")
 
-	cmd.Flags().StringP("kubecfg", "k", homedir+"/.kube/config", "kubecfg path to the cluster to account")
-	cmd.Flags().StringP("namespace", "n", "kube-system", "the namespace of the audit-tailer service")
-	cmd.Flags().StringP("service-name", "s", "kubernetes-audit-tailer", "the service name of the audit-tailer service")
-	cmd.Flags().StringP("secret-name", "e", "audittailer-client", "the name of the secret containing the CA file, client certificate and key")
+	cmd.Flags().StringP("shoot-kubeconfig", "o", homedir+"/.kube/config", "path to the shoot kubeconfig")
+	cmd.Flags().StringP("seed-kubeconfig", "o", homedir+"/.kube/seedconfig", "path to the seed kubeconfig")
+	cmd.Flags().StringP("namespace", "n", "kube-system", "the namespace of the target service")
+	cmd.Flags().StringP("service-name", "s", "", "the service name of the target service")
 	cmd.Flags().StringP("check-schedule", "S", "*/1 * * * *", "cron schedule when to check for service changes")
 	cmd.Flags().DurationP("backoff-timer", "b", time.Duration(10*time.Second), "Backoff time for restarting the forwarder process when it has been killed by external influences")
 	cmd.Flags().StringP("log-level", "L", "info", "sets the application log level")
-	cmd.Flags().StringP("proxy-host", "p", "", "If set, try and connect through this mTLS proxy at the given destination. Expected method is http-connect. Mutually exclusive with konectivity-uds-socket.")
+	cmd.Flags().StringP("proxy-host", "p", "vpn-seed-server", "Name of the mTLS proxy to connect to the shoot through the VPN. Expected method is http-connect.")
 	cmd.Flags().StringP("proxy-port", "P", "9443", "Port of the mTLS proxy specified with proxy-host.")
-	cmd.Flags().String("proxy-ca-file", "/proxy/ca/ca.crt", "the path to the CA file for checking the mTLS proxy server certificate")
-	cmd.Flags().String("proxy-client-crt-file", "/proxy/client/tls.crt", "the path to the proxy client certificate used to authenticate to the mTLS proxy server")
-	cmd.Flags().String("proxy-client-key-file", "/proxy/client/tls.key", "the path to the private key file belonging to the proy client certificate")
+	cmd.Flags().StringP("proxy-ca-secret", "P", "ca", "Name of the secret that contains the CA certificate use for the proxy server certificate.")
+	cmd.Flags().StringP("proxy-client-secret", "P", "9443", "Name of the secret that contains the client certificate needed for connecting to the proxy.")
+	cmd.Flags().String("tls-base-dir", "/proxy/tls", "the path to the CA file for checking the mTLS proxy server certificate")
+	cmd.Flags().String("proxy-ca-file", "ca.crt", "the path to the CA file for checking the mTLS proxy server certificate")
+	cmd.Flags().String("proxy-client-crt-file", "tls.crt", "the path to the proxy client certificate used to authenticate to the mTLS proxy server")
+	cmd.Flags().String("proxy-client-key-file", "tls.key", "the path to the private key file belonging to the proy client certificate")
 
 	err = viper.BindPFlags(cmd.Flags())
 	if err != nil {
@@ -130,18 +134,20 @@ func init() {
 
 func initOpts() (*Opts, error) {
 	opts := &Opts{
-		KubeCfg:            viper.GetString("kubecfg"),
-		NameSpace:          viper.GetString("namespace"),
-		ServiceName:        viper.GetString("service-name"),
-		SecretName:         viper.GetString("secret-name"),
-		CheckSchedule:      viper.GetString("check-schedule"),
-		BackoffTimer:       viper.GetDuration("backoff-timer"),
-		LogLevel:           viper.GetString("log-level"),
-		ProxyHost:          viper.GetString("proxy-host"),
-		ProxyPort:          viper.GetString("proxy-port"),
-		ProxyCaFile:        viper.GetString("proxy-ca-file"),
-		ProxyClientCrtFile: viper.GetString("proxy-client-crt-file"),
-		ProxyClientKeyFile: viper.GetString("proxy-client-key-file"),
+		ShootKubeconfig:        viper.GetString("shoot-kubeconfig"),
+		SeedKubeconfig:         viper.GetString("seed-kubeconfig"),
+		NameSpace:              viper.GetString("namespace"),
+		ServiceName:            viper.GetString("service-name"),
+		CheckSchedule:          viper.GetString("check-schedule"),
+		BackoffTimer:           viper.GetDuration("backoff-timer"),
+		LogLevel:               viper.GetString("log-level"),
+		ProxyHost:              viper.GetString("proxy-host"),
+		ProxyPort:              viper.GetString("proxy-port"),
+		ProxyCASecret:          viper.GetString("proxy-ca-secret"),
+		ProxyClientSecret:      viper.GetString("proxy-client-secret"),
+		ProxyCaFilename:        viper.GetString("proxy-ca-file"),
+		ProxyClientCrtFilename: viper.GetString("proxy-client-crt-file"),
+		ProxyClientKeyFilename: viper.GetString("proxy-client-key-file"),
 	}
 
 	validate := validator.New()
@@ -165,7 +171,7 @@ func main() {
 }
 
 func initConfig() {
-	viper.SetEnvPrefix("audit")
+	viper.SetEnvPrefix("gateway")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
 
@@ -223,9 +229,15 @@ func initSignalHandlers() {
 func run(opts *Opts) error {
 	logger.Debugw("Options", "opts", opts)
 	// Prepare K8s
-	client, err := loadClient(opts.KubeCfg)
+	shootClient, err := loadClient(opts.ShootKubeconfig)
 	if err != nil {
-		logger.Errorw("Unable to connect to k8s", "Error", err)
+		logger.Errorw("Unable to connect to shoot k8s", "Error", err)
+		return err
+	}
+
+	seedClient, err := loadClient(opts.SeedKubeconfig)
+	if err != nil {
+		logger.Errorw("Unable to connect to shoot k8s", "Error", err)
 		return err
 	}
 
@@ -234,8 +246,19 @@ func run(opts *Opts) error {
 		cron.SkipIfStillRunning(&CronLogger{l: logger.Named("cron")}),
 	))
 
+	secretCronID, err = cronjob.AddFunc(opts.CheckSchedule, func() {
+		err := readSecrets(opts, seedClient)
+		if err != nil {
+			logger.Errorw("error during secret check", "error", err)
+		}
+
+		logger.Debugw("scheduling next secret check", "at", cronjob.Entry(secretCronID).Next)
+	})
+	if err != nil {
+		return fmt.Errorf("could not initialize cron schedule %w", err)
+	}
 	serviceCronID, err = cronjob.AddFunc(opts.CheckSchedule, func() {
-		err := checkService(opts, client)
+		err := checkService(opts, shootClient)
 		if err != nil {
 			logger.Errorw("error during service check", "error", err)
 		}
@@ -248,7 +271,11 @@ func run(opts *Opts) error {
 
 	logger.Infow("start initial checks", "version", v.V.String())
 
-	err = checkService(opts, client)
+	err = readSecrets(opts, seedClient)
+	if err != nil {
+		logger.Errorw("error during initial secret check", "error", err)
+	}
+	err = checkService(opts, shootClient)
 	if err != nil {
 		logger.Errorw("error during initial service check", "error", err)
 	}
@@ -352,7 +379,7 @@ func checkService(opts *Opts, client *k8s.Clientset) error {
 
 	if opts.ProxyHost != "" { // This means we need to start a mTLS proxy
 		logger.Infow("Starting proxy", "host", opts.ProxyHost, "port", opts.ProxyPort)
-		clusterProxy, err = proxy.NewProxyMTLS(logger, opts.ProxyHost, opts.ProxyPort, opts.ProxyClientCrtFile, opts.ProxyClientKeyFile, opts.ProxyCaFile, serviceIP, servicePort, proxyListenAddress, proxyListenPort)
+		clusterProxy, err = proxy.NewProxyMTLS(logger, opts.ProxyHost, opts.ProxyPort, opts.ProxyClientCrtFilename, opts.ProxyClientKeyFilename, opts.ProxyCaFilename, serviceIP, servicePort, proxyListenAddress, proxyListenPort)
 		if err != nil {
 			logger.Errorw("Could not start mTLS proxy", "error", err)
 			return err
@@ -360,5 +387,38 @@ func checkService(opts *Opts, client *k8s.Clientset) error {
 	}
 
 	targetService = service
+	return nil
+}
+
+func readSecrets(opts *Opts, client *k8s.Clientset) error {
+	logger.Debugw("Reading secrets")
+	keys := []string{opts.ProxyCaFilename, opts.ProxyClientCrtFilename, opts.ProxyClientKeyFilename}
+
+	for _, secretName := range []string{opts.ProxyCASecret, opts.ProxyClientSecret} {
+		kubectx, kubecancel := context.WithTimeout(context.Background(), time.Duration(10*time.Second))
+		defer kubecancel()
+
+		secret, err := client.CoreV1().Secrets(opts.NameSpace).Get(kubectx, secretName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("did not find secret %q in namespace %s: %w", secretName, opts.NameSpace, err)
+		}
+		logger.Debugw("Got secret", secretName, secret.Name)
+
+		// Now we attempt to write the certificates to file
+		for key, value := range secret.Data {
+			for _, k := range keys {
+				if key == k {
+					f := path.Join(opts.TLSBaseDir, key)
+					logger.Debugw("Writing certificate to file", key, f)
+					err := os.WriteFile(f, value, 0600)
+					if err != nil {
+						return fmt.Errorf("could not write secret to certificate base folder:%w", err)
+					}
+				}
+			}
+		}
+
+	}
+
 	return nil
 }

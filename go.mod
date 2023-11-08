@@ -1,4 +1,4 @@
-module github.com/metal-stack/audit-forwarder
+module github.com/metal-stack/gardener-vpn-gateway
 
 go 1.21
 
