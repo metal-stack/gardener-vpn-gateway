@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -69,7 +70,8 @@ func (c *CronLogger) Error(err error, msg string, keysAndValues ...interface{}) 
 type Opts struct {
 	ShootKubeconfig        string `validate:"required"`
 	SeedKubeconfig         string
-	NameSpace              string `validate:"required"`
+	SeedNamespace          string `validate:"required"`
+	Namespace              string `validate:"required"`
 	ServiceName            string `validate:"required"`
 	CheckSchedule          string
 	BackoffTimer           time.Duration
@@ -113,17 +115,18 @@ func init() {
 
 	cmd.Flags().String("shoot-kubeconfig", homedir+"/.kube/config", "path to the shoot kubeconfig")
 	cmd.Flags().String("seed-kubeconfig", "", "path to the seed kubeconfig. Uses default path if empty.")
-	cmd.Flags().String("namespace", "kube-system", "the namespace of the target service")
+	cmd.Flags().String("seed-namespace", "", "the namespace in the seed cluster in which the proxy certificates reside")
+	cmd.Flags().String("namespace", "", "the namespace of the target service")
 	cmd.Flags().String("service-name", "", "the service name of the target service")
 	cmd.Flags().String("check-schedule", "*/1 * * * *", "cron schedule when to check for service changes")
 	cmd.Flags().Duration("backoff-timer", time.Duration(10*time.Second), "Backoff time for restarting the forwarder process when it has been killed by external influences")
 	cmd.Flags().String("log-level", "info", "sets the application log level")
 	cmd.Flags().String("proxy-host", "vpn-seed-server", "Name of the mTLS proxy to connect to the shoot through the VPN. Expected method is http-connect.")
 	cmd.Flags().String("proxy-port", "9443", "Port of the mTLS proxy specified with proxy-host.")
-	cmd.Flags().String("proxy-ca-secret", "ca-vpn", "Name of the secret that contains the CA certificate use for the proxy server certificate.")
-	cmd.Flags().String("proxy-client-secret", "http-proxy", "Name of the secret that contains the client certificate needed for connecting to the proxy.")
+	cmd.Flags().String("proxy-ca-secret", "ca-vpn-bundle", "Name of the secret that contains the CA certificate use for the proxy server certificate.")
+	cmd.Flags().String("proxy-client-secret", "kube-apiserver-http-proxy", "Name of the secret that contains the client certificate needed for connecting to the proxy.")
 	cmd.Flags().String("tls-base-dir", "/proxy/tls", "the path to the CA file for checking the mTLS proxy server certificate")
-	cmd.Flags().String("proxy-ca-file", "ca.crt", "the path to the CA file for checking the mTLS proxy server certificate")
+	cmd.Flags().String("proxy-ca-file", "bundle.crt", "the path to the CA file for checking the mTLS proxy server certificate")
 	cmd.Flags().String("proxy-client-crt-file", "tls.crt", "the path to the proxy client certificate used to authenticate to the mTLS proxy server")
 	cmd.Flags().String("proxy-client-key-file", "tls.key", "the path to the private key file belonging to the proy client certificate")
 
@@ -137,7 +140,8 @@ func initOpts() (*Opts, error) {
 	opts := &Opts{
 		ShootKubeconfig:        viper.GetString("shoot-kubeconfig"),
 		SeedKubeconfig:         viper.GetString("seed-kubeconfig"),
-		NameSpace:              viper.GetString("namespace"),
+		SeedNamespace:          viper.GetString("seed-namespace"),
+		Namespace:              viper.GetString("namespace"),
 		ServiceName:            viper.GetString("service-name"),
 		CheckSchedule:          viper.GetString("check-schedule"),
 		BackoffTimer:           viper.GetDuration("backoff-timer"),
@@ -281,10 +285,12 @@ func run(opts *Opts) error {
 	err = readSecrets(opts, seedClient)
 	if err != nil {
 		logger.Errorw("error during initial secret check", "error", err)
+		return err
 	}
 	err = checkService(opts, shootClient)
 	if err != nil {
 		logger.Errorw("error during initial service check", "error", err)
+		return err
 	}
 	cronjob.Start()
 	logger.Infow("cronjob interval", "check-schedule", opts.CheckSchedule)
@@ -350,7 +356,7 @@ func checkService(opts *Opts, client *k8s.Clientset) error {
 
 	kubectx, cancel := context.WithTimeout(context.Background(), time.Duration(10*time.Second))
 	defer cancel()
-	service, err := client.CoreV1().Services(opts.NameSpace).Get(kubectx, opts.ServiceName, metav1.GetOptions{})
+	service, err := client.CoreV1().Services(opts.Namespace).Get(kubectx, opts.ServiceName, metav1.GetOptions{})
 	if err != nil { // That means no matching service found
 		if targetService != nil { // This means a service was previously seen, and the proxy should already be running.
 			logger.Infow("Service went away, stopping proxy")
@@ -405,9 +411,9 @@ func readSecrets(opts *Opts, client *k8s.Clientset) error {
 		kubectx, kubecancel := context.WithTimeout(context.Background(), time.Duration(10*time.Second))
 		defer kubecancel()
 
-		secret, err := client.CoreV1().Secrets(opts.NameSpace).Get(kubectx, secretName, metav1.GetOptions{})
+		secret, err := getLatestSecret(kubectx, client, opts.SeedNamespace, secretName)
 		if err != nil {
-			return fmt.Errorf("did not find secret %q in namespace %s: %w", secretName, opts.NameSpace, err)
+			return fmt.Errorf("did not find secret %q in namespace %s: %w", secretName, opts.SeedNamespace, err)
 		}
 		logger.Debugw("Got secret", secretName, secret.Name)
 
@@ -428,4 +434,61 @@ func readSecrets(opts *Opts, client *k8s.Clientset) error {
 	}
 
 	return nil
+}
+
+func getLatestSecret(ctx context.Context, c *k8s.Clientset, namespace string, name string) (*corev1.Secret, error) {
+	selector := labels.SelectorFromSet(map[string]string{
+		"managed-by":       "secrets-manager",
+		"manager-identity": "gardenlet",
+		"name":             name,
+	})
+
+	secretList, err := c.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return getLatestIssuedSecret(secretList.Items)
+}
+
+// getLatestIssuedSecret returns the secret with the "issued-at-time" label that represents the latest point in time
+func getLatestIssuedSecret(secrets []corev1.Secret) (*corev1.Secret, error) {
+	const (
+		labelKeyIssuedAtTime = "issued-at-time"
+	)
+
+	if len(secrets) == 0 {
+		return nil, fmt.Errorf("no secret found")
+	}
+
+	var newestSecret *corev1.Secret
+	var currentIssuedAtTime time.Time
+	for i := 0; i < len(secrets); i++ {
+		// if some of the secrets have no "issued-at-time" label
+		// we have a problem since this is the source of truth
+		issuedAt, ok := secrets[i].Labels[labelKeyIssuedAtTime]
+		if !ok {
+			// there are some old secrets from ancient gardener versions which have to be skipped... (e.g. ssh-keypair.old)
+			continue
+		}
+
+		issuedAtUnix, err := strconv.ParseInt(issuedAt, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+
+		issuedAtTime := time.Unix(issuedAtUnix, 0).UTC()
+		if newestSecret == nil || issuedAtTime.After(currentIssuedAtTime) {
+			newestSecret = &secrets[i]
+			currentIssuedAtTime = issuedAtTime
+		}
+	}
+
+	if newestSecret == nil {
+		return nil, fmt.Errorf("no secret found")
+	}
+
+	return newestSecret, nil
 }

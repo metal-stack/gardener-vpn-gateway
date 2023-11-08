@@ -1,0 +1,6 @@
+FROM alpine:3.18
+
+COPY bin/gardener-vpn-gateway /gardener-vpn-gateway
+
+ENTRYPOINT ["/gardener-vpn-gateway"]
+CMD ["/gardener-vpn-gateway"]

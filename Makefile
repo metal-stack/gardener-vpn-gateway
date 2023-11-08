@@ -42,3 +42,9 @@ dockerimage:
 
 .PHONY: all
 all:: release;
+
+.PHONY: push-to-gardener-local
+push-to-gardener-local:
+	$(MAKE)	bin/$(BINARY)
+	docker build -f Dockerfile.dev -t ghcr.io/metal-stack/gardener-vpn-gateway:latest .
+	kind --name gardener-local load docker-image ghcr.io/metal-stack/gardener-vpn-gateway:latest
