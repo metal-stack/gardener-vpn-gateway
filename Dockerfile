@@ -6,7 +6,7 @@ COPY .git Makefile go.* *.go /work/
 COPY pkg/ /work/pkg/
 RUN make bin/gardener-vpn-gateway
 
-FROM debian:bullseye-20240211-slim
+FROM debian:12-slim
 
 COPY --from=builder /work/bin/gardener-vpn-gateway /
 
