@@ -4,11 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"path"
 	"time"
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -41,8 +40,7 @@ const (
 
 var (
 	cfgFile       string
-	logger        *zap.SugaredLogger
-	logLevel      zapcore.Level
+	logger        *slog.Logger
 	stop          context.Context
 	targetService *corev1.Service
 	secretCronID  cron.EntryID
@@ -52,16 +50,16 @@ var (
 
 // CronLogger is used for logging within the cron function.
 type CronLogger struct {
-	l *zap.SugaredLogger
+	l *slog.Logger
 }
 
 // Info logs info messages from the cron function.
 func (c *CronLogger) Info(msg string, keysAndValues ...interface{}) {
-	c.l.Infow(msg, keysAndValues...)
+	c.l.Info(msg, keysAndValues...)
 }
 
 func (c *CronLogger) Error(err error, msg string, keysAndValues ...interface{}) {
-	c.l.Errorw(msg, keysAndValues...)
+	c.l.Error(msg, keysAndValues...)
 }
 
 // Opts is required in order to have proper validation for args from cobra and viper.
@@ -165,11 +163,6 @@ func initOpts() (*Opts, error) {
 }
 
 func main() {
-	zap, _ := zap.NewProduction()
-	defer func() {
-		_ = zap.Sync()
-	}()
-	logger = zap.Sugar()
 	if err := cmd.Execute(); err != nil {
 		logger.Error("Failed executing root command", "Error", err)
 	}
@@ -185,7 +178,7 @@ func initConfig() {
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 		if err := viper.ReadInConfig(); err != nil {
-			logger.Errorw("Config file path set explicitly, but unreadable", "error", err)
+			logger.Error("Config file path set explicitly, but unreadable", "error", err)
 			os.Exit(1)
 		}
 	} else {
@@ -196,7 +189,7 @@ func initConfig() {
 		if err := viper.ReadInConfig(); err != nil {
 			usedCfg := viper.ConfigFileUsed()
 			if usedCfg != "" {
-				logger.Errorw("Config file unreadable", "config-file", usedCfg, "error", err)
+				logger.Error("Config file unreadable", "config-file", usedCfg, "error", err)
 				os.Exit(1)
 			}
 		}
@@ -204,27 +197,20 @@ func initConfig() {
 
 	usedCfg := viper.ConfigFileUsed()
 	if usedCfg != "" {
-		logger.Infow("Read config file", "config-file", usedCfg)
+		logger.Info("Read config file", "config-file", usedCfg)
 	}
 }
 
 func initLogging(opts *Opts) {
-	err := logLevel.UnmarshalText([]byte(opts.LogLevel))
+	var lvlvar slog.LevelVar
+
+	err := lvlvar.UnmarshalText([]byte(opts.LogLevel))
 	if err != nil {
-		log.Fatalf("can't initialize zap logger: %v", err)
+		log.Fatalf("can't initialize logger: %v", err)
 	}
+	lvlvar.Level()
 
-	cfg := zap.NewProductionConfig()
-	cfg.Level = zap.NewAtomicLevelAt(logLevel)
-
-	log.Printf("Log level: %s", cfg.Level)
-
-	l, err := cfg.Build()
-	if err != nil {
-		log.Fatalf("can't initialize zap logger: %v", err)
-	}
-
-	logger = l.Sugar()
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvlvar.Level()}))
 }
 
 func initSignalHandlers() {
@@ -232,11 +218,11 @@ func initSignalHandlers() {
 }
 
 func run(opts *Opts) error {
-	logger.Debugw("Options", "opts", opts)
+	logger.Debug("Options", "opts", opts)
 	// Prepare K8s
 	shootClient, err := loadClient(opts.ShootKubeconfig)
 	if err != nil {
-		logger.Errorw("Unable to connect to shoot k8s", "Error", err)
+		logger.Error("Unable to connect to shoot k8s", "Error", err)
 		return err
 	}
 
@@ -248,22 +234,22 @@ func run(opts *Opts) error {
 		seedClient, err = k8s.NewForConfig(seedConfig)
 	}
 	if err != nil {
-		logger.Errorw("Unable to connect to seed k8s", "Kubeconfig", opts.SeedKubeconfig, "Error", err)
+		logger.Error("Unable to connect to seed k8s", "Kubeconfig", opts.SeedKubeconfig, "Error", err)
 		return err
 	}
 
 	// Set up (and run) service checker cron job
 	cronjob := cron.New(cron.WithChain(
-		cron.SkipIfStillRunning(&CronLogger{l: logger.Named("cron")}),
+		cron.SkipIfStillRunning(&CronLogger{l: logger.WithGroup("cron")}),
 	))
 
 	secretCronID, err = cronjob.AddFunc(opts.CheckSchedule, func() {
 		err := readSecrets(opts, seedClient)
 		if err != nil {
-			logger.Errorw("error during secret check", "error", err)
+			logger.Error("error during secret check", "error", err)
 		}
 
-		logger.Debugw("scheduling next secret check", "at", cronjob.Entry(secretCronID).Next)
+		logger.Debug("scheduling next secret check", "at", cronjob.Entry(secretCronID).Next)
 	})
 	if err != nil {
 		return fmt.Errorf("could not initialize cron schedule %w", err)
@@ -271,30 +257,30 @@ func run(opts *Opts) error {
 	serviceCronID, err = cronjob.AddFunc(opts.CheckSchedule, func() {
 		err := checkService(opts, shootClient)
 		if err != nil {
-			logger.Errorw("error during service check", "error", err)
+			logger.Error("error during service check", "error", err)
 		}
 
-		logger.Debugw("scheduling next service check", "at", cronjob.Entry(serviceCronID).Next)
+		logger.Debug("scheduling next service check", "at", cronjob.Entry(serviceCronID).Next)
 	})
 	if err != nil {
 		return fmt.Errorf("could not initialize cron schedule %w", err)
 	}
 
-	logger.Infow("start initial checks", "version", v.V.String())
+	logger.Info("start initial checks", "version", v.V.String())
 
 	err = readSecrets(opts, seedClient)
 	if err != nil {
-		logger.Errorw("error during initial secret check", "error", err)
+		logger.Error("error during initial secret check", "error", err)
 		return err
 	}
 	err = checkService(opts, shootClient)
 	if err != nil {
-		logger.Errorw("error during initial service check", "error", err)
+		logger.Error("error during initial service check", "error", err)
 		return err
 	}
 	cronjob.Start()
-	logger.Infow("cronjob interval", "check-schedule", opts.CheckSchedule)
-	logger.Debugw("Cronjob", "entries:", cronjob.Entries())
+	logger.Info("cronjob interval", "check-schedule", opts.CheckSchedule)
+	logger.Debug("Cronjob", "entries:", cronjob.Entries())
 
 	<-stop.Done()
 	logger.Info("received stop signal, shutting down...")
@@ -351,15 +337,15 @@ example from client-go
 	}
 */
 func checkService(opts *Opts, client *k8s.Clientset) error {
-	logger.Debugw("Checking service")
-	// logger.Debugw("Current service", "targetService", targetService)
+	logger.Debug("Checking service")
+	// logger.Debug("Current service", "targetService", targetService)
 
 	kubectx, cancel := context.WithTimeout(context.Background(), time.Duration(10*time.Second))
 	defer cancel()
 	service, err := client.CoreV1().Services(opts.Namespace).Get(kubectx, opts.ServiceName, metav1.GetOptions{})
 	if err != nil { // That means no matching service found
 		if targetService != nil { // This means a service was previously seen, and the proxy should already be running.
-			logger.Infow("Service went away, stopping proxy")
+			logger.Info("Service went away, stopping proxy")
 			if clusterProxy != nil { // This means there should be a running proxy, we need to stop it too.
 				clusterProxy.DestroyProxy()
 				clusterProxy = nil
@@ -369,17 +355,17 @@ func checkService(opts *Opts, client *k8s.Clientset) error {
 		return err
 	}
 
-	// logger.Debugw("Service gotten", "service", service)
+	// logger.Debug("Service gotten", "service", service)
 	serviceIP := service.Spec.ClusterIP
 	if len(service.Spec.Ports) != 1 {
-		logger.Errorw("Service must have exactly one port", "Ports", service.Spec.Ports)
+		logger.Error("Service must have exactly one port", "Ports", service.Spec.Ports)
 		return errors.New("service must have exactly one port")
 	}
 	servicePort := strconv.Itoa(int(service.Spec.Ports[0].Port))
 
 	if targetService != nil { // This means a service was previously seen, and the proxy should already be running.
 		if targetService.Spec.ClusterIP == service.Spec.ClusterIP && targetService.Spec.Ports[0].Port == service.Spec.Ports[0].Port {
-			logger.Debugw("Service stayed the same, nothing to do.")
+			logger.Debug("Service stayed the same, nothing to do.")
 			return nil
 		}
 		if clusterProxy != nil { // This means there should be a running proxy, we need to stop it too.
@@ -388,13 +374,13 @@ func checkService(opts *Opts, client *k8s.Clientset) error {
 		}
 	}
 
-	logger.Infow("Target identified", "IP", serviceIP, "Port", servicePort)
+	logger.Info("Target identified", "IP", serviceIP, "Port", servicePort)
 
 	if opts.ProxyHost != "" { // This means we need to start a mTLS proxy
-		logger.Infow("Starting proxy", "host", opts.ProxyHost, "port", opts.ProxyPort)
+		logger.Info("Starting proxy", "host", opts.ProxyHost, "port", opts.ProxyPort)
 		clusterProxy, err = proxy.NewProxyMTLS(logger, opts.ProxyHost, opts.ProxyPort, opts.ProxyClientCrtFilename, opts.ProxyClientKeyFilename, opts.ProxyCaFilename, serviceIP, servicePort, proxyListenAddress, proxyListenPort)
 		if err != nil {
-			logger.Errorw("Could not start mTLS proxy", "error", err)
+			logger.Error("Could not start mTLS proxy", "error", err)
 			return err
 		}
 	}
@@ -404,7 +390,7 @@ func checkService(opts *Opts, client *k8s.Clientset) error {
 }
 
 func readSecrets(opts *Opts, client *k8s.Clientset) error {
-	logger.Debugw("Reading secrets")
+	logger.Debug("Reading secrets")
 	keys := []string{opts.ProxyCaFilename, opts.ProxyClientCrtFilename, opts.ProxyClientKeyFilename}
 
 	for _, secretName := range []string{opts.ProxyCASecret, opts.ProxyClientSecret} {
@@ -415,14 +401,14 @@ func readSecrets(opts *Opts, client *k8s.Clientset) error {
 		if err != nil {
 			return fmt.Errorf("did not find secret %q in namespace %s: %w", secretName, opts.SeedNamespace, err)
 		}
-		logger.Debugw("Got secret", secretName, secret.Name)
+		logger.Debug("Got secret", secretName, secret.Name)
 
 		// Now we attempt to write the certificates to file
 		for key, value := range secret.Data {
 			for _, k := range keys {
 				if key == k {
 					f := path.Join(opts.TLSBaseDir, key)
-					logger.Debugw("Writing certificate to file", key, f)
+					logger.Debug("Writing certificate to file", key, f)
 					err := os.WriteFile(f, value, 0600)
 					if err != nil {
 						return fmt.Errorf("could not write secret to certificate base folder:%w", err)
@@ -465,7 +451,7 @@ func getLatestIssuedSecret(secrets []corev1.Secret) (*corev1.Secret, error) {
 
 	var newestSecret *corev1.Secret
 	var currentIssuedAtTime time.Time
-	for i := 0; i < len(secrets); i++ {
+	for i := range len(secrets) {
 		// if some of the secrets have no "issued-at-time" label
 		// we have a problem since this is the source of truth
 		issuedAt, ok := secrets[i].Labels[labelKeyIssuedAtTime]
