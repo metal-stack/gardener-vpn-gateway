@@ -89,7 +89,7 @@ func (p *Proxy) forward() {
 // Closes the listener.
 func (p *Proxy) DestroyProxy() {
 	p.logger.Info("Closing forwarder", "destination ip", p.destinationIP)
-	p.listener.Close()
+	_ = p.listener.Close()
 }
 
 func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
@@ -119,14 +119,20 @@ func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
 		p.logger.Error("dialing mTLS proxy failed", "proxy address", p.proxyHost+":"+p.proxyPort, "error", err)
 		return
 	}
-	fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n", net.JoinHostPort(p.destinationIP, p.destinationPort), p.listenerIP, "gardener-vpn-gateway")
+	if _, err = fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n", net.JoinHostPort(p.destinationIP, p.destinationPort), p.listenerIP, "gardener-vpn-gateway"); err != nil {
+		p.logger.Error("unable to writer connect header to proxyConn", "error", err)
+		return
+	}
+
 	br := bufio.NewReader(proxyConn)
 	res, err := http.ReadResponse(br, nil)
 	if err != nil {
 		p.logger.Error("reading HTTP response from CONNECT failed", "destination", p.destinationIP, "error", err)
 		return
 	}
-	defer res.Body.Close()
+	defer func() {
+		_ = res.Body.Close()
+	}()
 
 	if res.StatusCode != 200 {
 		p.logger.Error("proxy error while dialing", "destination", p.destinationIP, "error", res.Status)
@@ -159,10 +165,10 @@ func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
 		// useful, so we can optionally SetLinger(0) here to recycle the port
 		// faster.
 		_ = srvConn.SetLinger(0)
-		srvConn.Close()
+		_ = srvConn.Close()
 		waitFor = serverClosed
 	case <-serverClosed:
-		proxyConn.Close()
+		_ = proxyConn.Close()
 		waitFor = proxyClosed
 	}
 
