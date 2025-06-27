@@ -1,4 +1,4 @@
-FROM golang:1.21 AS builder
+FROM golang:1.24 AS builder
 
 WORKDIR /work
 
@@ -6,7 +6,7 @@ COPY .git Makefile go.* *.go /work/
 COPY pkg/ /work/pkg/
 RUN make bin/gardener-vpn-gateway
 
-FROM debian:bullseye-20231030-slim
+FROM debian:12-slim
 
 COPY --from=builder /work/bin/gardener-vpn-gateway /
 

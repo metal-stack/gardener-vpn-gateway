@@ -16,15 +16,14 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
-
-	"go.uber.org/zap"
 )
 
 type Proxy struct {
-	logger          *zap.SugaredLogger
+	logger          *slog.Logger
 	proxyHost       string
 	proxyPort       string
 	clientCertFile  string
@@ -38,8 +37,8 @@ type Proxy struct {
 }
 
 // Creates a new proxy instance and opens a TCP listener for accepting connections.
-func NewProxyMTLS(logger *zap.SugaredLogger, proxyHost, proxyPort, clientCertFile, clientKeyFile, proxyCAFile, destinationIP, destinationPort, listenerIP, listenerPort string) (*Proxy, error) {
-	logger.Infow("NewProxyMTLS called", "proxy host", proxyHost, "proxy port", proxyPort, "listener IP", listenerIP, "listener port", listenerPort)
+func NewProxyMTLS(logger *slog.Logger, proxyHost, proxyPort, clientCertFile, clientKeyFile, proxyCAFile, destinationIP, destinationPort, listenerIP, listenerPort string) (*Proxy, error) {
+	logger.Info("NewProxyMTLS called", "proxy host", proxyHost, "proxy port", proxyPort, "listener IP", listenerIP, "listener port", listenerPort)
 
 	proxy := &Proxy{
 		logger:          logger,
@@ -56,7 +55,7 @@ func NewProxyMTLS(logger *zap.SugaredLogger, proxyHost, proxyPort, clientCertFil
 
 	err := proxy.listen()
 	if err != nil {
-		logger.Errorw("Error opening listener", "proxy", proxy)
+		logger.Error("Error opening listener", "proxy", proxy)
 		return nil, err
 	}
 	go proxy.forward()
@@ -68,7 +67,7 @@ func (p *Proxy) listen() error {
 	var err error
 	p.listener, err = net.ListenTCP("tcp", listenerTCPAddr)
 	if err != nil {
-		p.logger.Errorw("Could not open listener", "listener address", listenerTCPAddr)
+		p.logger.Error("Could not open listener", "listener address", listenerTCPAddr)
 		return err
 	}
 	return nil
@@ -78,10 +77,10 @@ func (p *Proxy) forward() {
 	for {
 		srvConn, err := p.listener.AcceptTCP()
 		if err != nil {
-			p.logger.Errorw("Error accepting connection on listener", "listener:", p.listener)
+			p.logger.Error("Error accepting connection on listener", "listener:", p.listener)
 			return
 		}
-		p.logger.Infow("New connection", "listener", p.listener, "to (listener address)", srvConn.LocalAddr(), "from (client address)", srvConn.RemoteAddr())
+		p.logger.Info("New connection", "listener", p.listener, "to (listener address)", srvConn.LocalAddr(), "from (client address)", srvConn.RemoteAddr())
 
 		go p.handleConnection(srvConn)
 	}
@@ -89,23 +88,23 @@ func (p *Proxy) forward() {
 
 // Closes the listener.
 func (p *Proxy) DestroyProxy() {
-	p.logger.Infow("Closing forwarder", "destination ip", p.destinationIP)
-	p.listener.Close()
+	p.logger.Info("Closing forwarder", "destination ip", p.destinationIP)
+	_ = p.listener.Close()
 }
 
 func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
-	p.logger.Infow("handleConnection called", "local address", srvConn.LocalAddr(), "remote address", srvConn.RemoteAddr(), "proxy host", p.proxyHost, "proxy port", p.proxyPort, "target address", p.destinationIP)
+	p.logger.Info("handleConnection called", "local address", srvConn.LocalAddr(), "remote address", srvConn.RemoteAddr(), "proxy host", p.proxyHost, "proxy port", p.proxyPort, "target address", p.destinationIP)
 	var proxyConn net.Conn
 	var err error
 
 	clientCert, err := tls.LoadX509KeyPair(p.clientCertFile, p.clientKeyFile)
 	if err != nil {
-		p.logger.Errorw("Could not read client certificate and key", "client cert", p.clientCertFile, "client key", p.clientKeyFile)
+		p.logger.Error("Could not read client certificate and key", "client cert", p.clientCertFile, "client key", p.clientKeyFile)
 		return
 	}
 	proxyCAPEM, err := os.ReadFile(p.proxyCAFile)
 	if err != nil {
-		p.logger.Errorw("Couldn't load proxy CA file", "proxyCAFile", p.proxyCAFile)
+		p.logger.Error("Couldn't load proxy CA file", "proxyCAFile", p.proxyCAFile)
 		return
 	}
 	proxyCAPool := x509.NewCertPool()
@@ -117,20 +116,26 @@ func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
 		MinVersion:   tls.VersionTLS12,
 	})
 	if err != nil {
-		p.logger.Errorw("dialing mTLS proxy failed", "proxy address", p.proxyHost+":"+p.proxyPort, "error", err)
+		p.logger.Error("dialing mTLS proxy failed", "proxy address", p.proxyHost+":"+p.proxyPort, "error", err)
 		return
 	}
-	fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n", net.JoinHostPort(p.destinationIP, p.destinationPort), p.listenerIP, "gardener-vpn-gateway")
+	if _, err = fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n", net.JoinHostPort(p.destinationIP, p.destinationPort), p.listenerIP, "gardener-vpn-gateway"); err != nil {
+		p.logger.Error("unable to writer connect header to proxyConn", "error", err)
+		return
+	}
+
 	br := bufio.NewReader(proxyConn)
 	res, err := http.ReadResponse(br, nil)
 	if err != nil {
-		p.logger.Errorf("reading HTTP response from CONNECT to %s failed: %v", p.destinationIP, err)
+		p.logger.Error("reading HTTP response from CONNECT failed", "destination", p.destinationIP, "error", err)
 		return
 	}
-	defer res.Body.Close()
+	defer func() {
+		_ = res.Body.Close()
+	}()
 
 	if res.StatusCode != 200 {
-		p.logger.Errorf("proxy error while dialing %s: %v", p.destinationIP, res.Status)
+		p.logger.Error("proxy error while dialing", "destination", p.destinationIP, "error", res.Status)
 		return
 	}
 	// It's safe to discard the bufio.Reader here and return the
@@ -138,7 +143,7 @@ func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
 	// TLS, and in TLS the client speaks first, so we know there's
 	// no unbuffered data. But we can double-check.
 	if br.Buffered() > 0 {
-		p.logger.Errorf("unexpected %d bytes of buffered data from CONNECT", br.Buffered())
+		p.logger.Error("unexpected number of bytes of buffered data from CONNECT", "bytes", br.Buffered())
 		return
 	}
 	// Now we're supposed to have both connections open.
@@ -160,10 +165,10 @@ func (p *Proxy) handleConnection(srvConn *net.TCPConn) {
 		// useful, so we can optionally SetLinger(0) here to recycle the port
 		// faster.
 		_ = srvConn.SetLinger(0)
-		srvConn.Close()
+		_ = srvConn.Close()
 		waitFor = serverClosed
 	case <-serverClosed:
-		proxyConn.Close()
+		_ = proxyConn.Close()
 		waitFor = proxyClosed
 	}
 
@@ -184,10 +189,10 @@ func (p *Proxy) broker(dst, src net.Conn, srcClosed chan struct{}) {
 	_, err := io.Copy(dst, src)
 
 	if err != nil {
-		p.logger.Errorf("Copy error: %s", err)
+		p.logger.Error("Copy error", "error", err)
 	}
 	if err := src.Close(); err != nil {
-		p.logger.Errorf("Close error: %s", err)
+		p.logger.Error("Close error", "error", err)
 	}
 	srcClosed <- struct{}{}
 }

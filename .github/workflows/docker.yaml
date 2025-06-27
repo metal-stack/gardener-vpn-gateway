@@ -22,7 +22,7 @@ jobs:
 
     steps:
     - name: Log in to the container registry
-      uses: docker/login-action@v2
+      uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ secrets.DOCKER_REGISTRY_USER }}
@@ -31,16 +31,16 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Set up Go 1.21
-      uses: actions/setup-go@v4
+    - name: Set up Go 1.24
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.21.x'
+        go-version: '1.24.x'
         cache: false
 
     - name: Lint
-      uses: golangci/golangci-lint-action@v3
+      uses: golangci/golangci-lint-action@v8
       with:
-        args: --build-tags integration -p bugs -p unused --timeout=3m
+        args: --build-tags integration --timeout=3m
 
     - name: Make tag
       run: |
